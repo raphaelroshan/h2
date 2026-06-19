@@ -14,6 +14,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::AsyncRead;
 
+/// Frames to process per `poll2()` call before yielding back to the runtime.
+const MAX_FRAMES_PER_POLL: usize = 32;
+
 /// An H2 connection
 #[derive(Debug)]
 pub(crate) struct Connection<T, P, B: Buf = Bytes>
@@ -321,6 +324,8 @@ where
         // second (and thus, the clock wouldn't have changed enough to matter).
         self.clear_expired_reset_streams();
 
+        let mut frames_processed: usize = 0;
+
         loop {
             // First, ensure that the `Connection` is able to receive a frame
             //
@@ -362,6 +367,18 @@ where
                 ReceivedFrame::Done => {
                     return Poll::Ready(Ok(()));
                 }
+            }
+
+            frames_processed += 1;
+            if frames_processed >= MAX_FRAMES_PER_POLL {
+                tracing::trace!(
+                    "processed {} frames, yielding to runtime",
+                    frames_processed
+                );
+                // Wake immediately so we resume the remaining buffered frames,
+                // but let the executor run other tasks before we do.
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
             }
         }
     }

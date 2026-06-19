@@ -277,6 +277,7 @@ impl Decoder {
         Ok(())
     }
 
+    #[inline]
     fn decode_indexed(&self, buf: &mut Cursor<&mut BytesMut>) -> Result<Header, DecoderError> {
         let index = decode_int(buf, 7)?;
         self.table.get(index)
@@ -371,6 +372,7 @@ impl Default for Decoder {
 // ===== impl Representation =====
 
 impl Representation {
+    #[inline]
     pub fn load(byte: u8) -> Result<Representation, DecoderError> {
         const INDEXED: u8 = 0b1000_0000;
         const LITERAL_WITH_INDEXING: u8 = 0b0100_0000;
@@ -397,6 +399,7 @@ impl Representation {
     }
 }
 
+#[inline]
 fn decode_int<B: Buf>(buf: &mut B, prefix_size: u8) -> Result<usize, DecoderError> {
     // The octet limit is chosen such that the maximum allowed *value* can
     // never overflow an unsigned 32-bit integer. The maximum value of any
@@ -456,6 +459,7 @@ fn decode_int<B: Buf>(buf: &mut B, prefix_size: u8) -> Result<usize, DecoderErro
     Err(DecoderError::NeedMore(NeedMore::IntegerUnderflow))
 }
 
+#[inline]
 fn peek_u8<B: Buf>(buf: &B) -> Option<u8> {
     if buf.has_remaining() {
         Some(buf.chunk()[0])
@@ -489,7 +493,9 @@ fn consume(buf: &mut Cursor<&mut BytesMut>) {
     // remove bytes from the internal BytesMut when they have been successfully
     // decoded. This is a more permanent cursor position, which will be
     // used to resume if decoding was only partial.
-    take(buf, 0);
+    if buf.position() > 0 {
+        take(buf, 0);
+    }
 }
 
 // ===== impl Table =====
@@ -625,6 +631,7 @@ impl From<DecoderError> for frame::Error {
 }
 
 /// Get an entry from the static table
+#[inline]
 pub fn get_static(idx: usize) -> Header {
     use http::header::HeaderValue;
 

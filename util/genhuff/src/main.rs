@@ -6,13 +6,23 @@ struct Node {
     right: Option<Box<Node>>,
     terminal: Option<usize>,
     maybe_eos: bool,
-    transitions: RefCell<Vec<Transition>>,
+    transitions4: RefCell<Vec<Transition>>,
+    transitions8: RefCell<Vec<Transition8>>,
 }
 
 #[derive(Debug, Default, Copy, Clone)]
 struct Transition {
     target: Option<usize>,
     byte: Option<usize>,
+    maybe_eos: bool,
+}
+
+// 8-bit input transition; one byte can decode to 0, 1, or 2 output bytes
+#[derive(Debug, Default, Copy, Clone)]
+struct Transition8 {
+    target: Option<usize>,
+    byte1: Option<usize>,
+    byte2: Option<usize>,
     maybe_eos: bool,
 }
 
@@ -24,7 +34,8 @@ impl Node {
             right: None,
             terminal: None,
             maybe_eos: false,
-            transitions: Default::default(),
+            transitions4: Default::default(),
+            transitions8: Default::default(),
         });
 
         node.insert(byte, code);
@@ -86,19 +97,19 @@ impl Node {
         }
     }
 
-    fn compute_transitions(&self, root: &Node) {
-        self.compute_transition(None, self, root, 4);
+    fn compute_transitions4(&self, root: &Node) {
+        self.compute_transition4(None, self, root, 4);
 
         if let Some(ref node) = self.left {
-            node.compute_transitions(root);
+            node.compute_transitions4(root);
         }
 
         if let Some(ref node) = self.right {
-            node.compute_transitions(root);
+            node.compute_transitions4(root);
         }
     }
 
-    fn compute_transition(
+    fn compute_transition4(
         &self,
         byte: Option<usize>,
         start: &Node,
@@ -111,7 +122,7 @@ impl Node {
                 _ => (byte, Some(self.id.unwrap_or(0))),
             };
 
-            start.transitions.borrow_mut().push(Transition {
+            start.transitions4.borrow_mut().push(Transition {
                 target,
                 byte,
                 maybe_eos: self.maybe_eos,
@@ -138,11 +149,79 @@ impl Node {
                 None => byte,
             };
 
-            node.compute_transition(byte, start, root, steps_remaining - 1);
+            node.compute_transition4(byte, start, root, steps_remaining - 1);
         }
     }
 
-    fn print(&self) {
+    fn compute_transitions8(&self, root: &Node) {
+        self.compute_transition8(None, None, self, root, 8);
+
+        if let Some(ref node) = self.left {
+            node.compute_transitions8(root);
+        }
+
+        if let Some(ref node) = self.right {
+            node.compute_transitions8(root);
+        }
+    }
+
+    fn compute_transition8(
+        &self,
+        byte1: Option<usize>,
+        byte2: Option<usize>,
+        start: &Node,
+        root: &Node,
+        steps_remaining: usize,
+    ) {
+        if steps_remaining == 0 {
+            let is_error = byte1 == Some(256) || byte2 == Some(256);
+
+            if is_error {
+                start.transitions8.borrow_mut().push(Transition8 {
+                    target: None,
+                    byte1: None,
+                    byte2: None,
+                    maybe_eos: self.maybe_eos,
+                });
+            } else {
+                start.transitions8.borrow_mut().push(Transition8 {
+                    target: Some(self.id.unwrap_or(0)),
+                    byte1,
+                    byte2,
+                    maybe_eos: self.maybe_eos,
+                });
+            }
+
+            return;
+        }
+
+        let mut next = self;
+
+        if self.terminal.is_some() {
+            next = root;
+        }
+
+        assert!(next.left.is_some());
+        assert!(next.right.is_some());
+
+        for node in &[next.left.as_ref().unwrap(), next.right.as_ref().unwrap()] {
+            let (b1, b2) = match node.terminal {
+                Some(b) => {
+                    if byte1.is_none() {
+                        (Some(b), None)
+                    } else {
+                        assert!(byte2.is_none());
+                        (byte1, Some(b))
+                    }
+                }
+                None => (byte1, byte2),
+            };
+
+            node.compute_transition8(b1, b2, start, root, steps_remaining - 1);
+        }
+    }
+
+    fn print4(&self) {
         const MAYBE_EOS: u8 = 1;
         const DECODED: u8 = 2;
         const ERROR: u8 = 4;
@@ -154,7 +233,7 @@ impl Node {
         println!("    // {}", self.id.unwrap());
         println!("    [");
 
-        for transition in self.transitions.borrow().iter() {
+        for transition in self.transitions4.borrow().iter() {
             let mut flags = 0;
             let mut out = 0;
 
@@ -169,8 +248,6 @@ impl Node {
             if let Some(byte) = transition.byte {
                 out = byte;
                 flags |= DECODED;
-
-                // TODO: Add other flags
             }
 
             if transition.maybe_eos {
@@ -182,8 +259,54 @@ impl Node {
 
         println!("    ],");
 
-        self.left.as_ref().unwrap().print();
-        self.right.as_ref().unwrap().print();
+        self.left.as_ref().unwrap().print4();
+        self.right.as_ref().unwrap().print4();
+    }
+
+    fn print8(&self) {
+        const MAYBE_EOS: u8 = 1;
+        const ERROR: u8 = 4;
+        const DECODED_1: u8 = 1 << 4;
+        const DECODED_2: u8 = 2 << 4;
+
+        if self.terminal.is_some() {
+            return;
+        }
+
+        println!("    // {}", self.id.unwrap());
+        println!("    [");
+
+        for transition in self.transitions8.borrow().iter() {
+            let mut flags: u8 = 0;
+
+            let target = match transition.target {
+                Some(target) => target,
+                None => {
+                    flags |= ERROR;
+                    0
+                }
+            };
+
+            let b1 = transition.byte1.unwrap_or(0);
+            let b2 = transition.byte2.unwrap_or(0);
+
+            if transition.byte2.is_some() {
+                flags |= DECODED_2;
+            } else if transition.byte1.is_some() {
+                flags |= DECODED_1;
+            }
+
+            if transition.maybe_eos {
+                flags |= MAYBE_EOS;
+            }
+
+            println!("        ({}, {}, {}, 0x{:02x}),", target, b1, b2, flags);
+        }
+
+        println!("    ],");
+
+        self.left.as_ref().unwrap().print8();
+        self.right.as_ref().unwrap().print8();
     }
 }
 
@@ -229,7 +352,8 @@ fn load_table() -> (Vec<(usize, String)>, Box<Node>) {
     root.set_id(&mut id, &mut vec![]);
 
     // Compute transitions for each node
-    root.compute_transitions(&root);
+    root.compute_transitions4(&root);
+    root.compute_transitions8(&root);
 
     (encode, root)
 }
@@ -251,7 +375,16 @@ pub fn main() {
     println!("// (next-state, byte, flags)");
     println!("pub const DECODE_TABLE: [[(u8, u8, u8); 16]; 256] = [");
 
-    decode.print();
+    decode.print4();
+
+    println!("];");
+
+    println!();
+    println!("// 8-bit lookup table: (next-state, byte1, byte2, flags)");
+    println!("// flags: bit 0 = MAYBE_EOS, bit 2 = ERROR, bits 4-5 = decoded byte count (0/1/2)");
+    println!("pub const DECODE_TABLE_8BIT: [[(u8, u8, u8, u8); 256]; 256] = [");
+
+    decode.print8();
 
     println!("];");
 }

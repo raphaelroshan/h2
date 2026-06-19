@@ -1,6 +1,6 @@
 mod table;
 
-use self::table::{DECODE_TABLE, ENCODE_TABLE};
+use self::table::{DECODE_TABLE, DECODE_TABLE_8BIT, ENCODE_TABLE};
 use crate::hpack::DecoderError;
 
 use bytes::{BufMut, BytesMut};
@@ -13,9 +13,17 @@ struct Decoder {
 
 // These flags must match the ones in genhuff.rs
 
+// 4-bit table flags
 const MAYBE_EOS: u8 = 1;
 const DECODED: u8 = 2;
 const ERROR: u8 = 4;
+
+// 8-bit table flags
+const MAYBE_EOS_8: u8 = 1;
+const ERROR_8: u8 = 4;
+const DECODED_COUNT_MASK: u8 = 0x30; // bits 4-5
+const DECODED_1: u8 = 1 << 4;
+const DECODED_2: u8 = 2 << 4;
 
 pub fn decode(src: &[u8], buf: &mut BytesMut) -> Result<BytesMut, DecoderError> {
     let mut decoder = Decoder::new();
@@ -23,14 +31,9 @@ pub fn decode(src: &[u8], buf: &mut BytesMut) -> Result<BytesMut, DecoderError> 
     // Max compression ratio is >= 0.5
     buf.reserve(src.len() << 1);
 
-    for b in src {
-        if let Some(b) = decoder.decode4(b >> 4)? {
-            buf.put_u8(b);
-        }
-
-        if let Some(b) = decoder.decode4(b & 0xf)? {
-            buf.put_u8(b);
-        }
+    // Decode a whole byte at a time via the 8-bit table
+    for &b in src {
+        decoder.decode8(b, buf)?;
     }
 
     if !decoder.is_final() {
@@ -73,7 +76,8 @@ impl Decoder {
         }
     }
 
-    // Decodes 4 bits
+    // Decodes 4 bits (kept for reference / fallback)
+    #[allow(dead_code)]
     fn decode4(&mut self, input: u8) -> Result<Option<u8>, DecoderError> {
         // (next-state, byte, flags)
         let (next, byte, flags) = DECODE_TABLE[self.state as usize][input as usize];
@@ -93,6 +97,30 @@ impl Decoder {
         self.maybe_eos = flags & MAYBE_EOS == MAYBE_EOS;
 
         Ok(ret)
+    }
+
+    // Decodes 8 bits, emitting 0, 1, or 2 output bytes
+    #[inline(always)]
+    fn decode8(&mut self, input: u8, buf: &mut BytesMut) -> Result<(), DecoderError> {
+        let (next, byte1, byte2, flags) =
+            DECODE_TABLE_8BIT[self.state as usize][input as usize];
+
+        if flags & ERROR_8 == ERROR_8 {
+            return Err(DecoderError::InvalidHuffmanCode);
+        }
+
+        let decoded_count = flags & DECODED_COUNT_MASK;
+        if decoded_count >= DECODED_1 {
+            buf.put_u8(byte1);
+            if decoded_count >= DECODED_2 {
+                buf.put_u8(byte2);
+            }
+        }
+
+        self.state = next;
+        self.maybe_eos = flags & MAYBE_EOS_8 == MAYBE_EOS_8;
+
+        Ok(())
     }
 
     fn is_final(&self) -> bool {
